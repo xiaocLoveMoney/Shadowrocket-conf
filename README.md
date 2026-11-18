@@ -49,6 +49,7 @@ shadowrocket://config/add/https://raw.githubusercontent.com/xiaocLoveMoney/Shado
 | 设置 → GeoLite2 数据库 → 自动后台更新 | 打开，间隔 7 天 | 跟上游周更节奏 |
 | 设置 → 延迟测试方法 | CONNECT | 官方手册推荐 |
 | 首页 → 全局路由 | **配置** | 选「代理」或「直连」时分流规则不生效 |
+| 设置 → UDP → 启用转发 | **打开**（节点也要支持 UDP） | 国外 STUN 要经节点发出，WebRTC 才显示节点 IP；不开时 STUN 被拒绝，测试页拿不到 IP，但也不会泄漏 |
 | 设置 → 代理 → 代理类型 | 银行等 App 检测到代理时改 **None（TUN 模式）** | 只影响兼容性，不影响泄漏 |
 
 ## 3. 防泄漏是怎么做到的
@@ -61,35 +62,37 @@ shadowrocket://config/add/https://raw.githubusercontent.com/xiaocLoveMoney/Shado
 | 解析失败回落明文 | `dns-direct-fallback-proxy = true`：直连域名解析失败改走代理解析 |
 | HTTPS/SVCB 记录绕过 Fake-IP | `allow-dns-svcb = false` |
 | App 硬编码公共 DNS | `hijack-dns` 劫持 8.8.8.8 / 1.1.1.1 / 9.9.9.9 / OpenDNS 等 |
-| WebRTC 暴露公网 IPv4 | **节点 IP 模式**：STUN/TURN 端口（3478-3481、5349/5350、19302-19309）在所有 DIRECT 规则之前强制走「WebRTC」策略组，不分 TCP/UDP，也不管目标是不是国内 IP。网页看到的是节点出口 IP，和访问网站的 IP 一致 |
-| WebRTC 暴露公网 IPv6 | 节点普遍不支持 v6，`stun-response-ipv6 = ::1` 继续伪造 |
-| UDP 回落直连暴露 IP | `udp-policy-not-supported-behaviour = REJECT`：节点不支持 UDP 时直接拒绝 STUN，网页拿不到任何 IP |
-| IPv6 绕过代理 | `ipv6 = false`，不返回 AAAA |
+| WebRTC 暴露公网 IPv4 | **精准分流**（和 v2rayN TUN 模式同一机制）：STUN 请求和普通流量一样按域名分流。国外 STUN（Google / Cloudflare / Twilio / Mozilla）走代理，网页看到节点 IP；国内 STUN（小米 / 腾讯）直连。**比 v2rayN 多一层**：不带域名、直接写 IP 的 STUN（3478-3481、5349/5350、19302-19309 端口）在 GEOIP 之前强制走「WebRTC」组，不会因为目标是国内 IP 就直连 |
+| WebRTC 暴露公网 IPv6 | `stun-response-ipv6 = ::1` 伪造 |
+| UDP 回落直连暴露 IP | `udp-policy-not-supported-behaviour = REJECT`：节点不支持 UDP 时直接拒绝，网页拿不到任何 IP |
+| IPv6 绕过代理 | 三层禁用：`ipv6 = false`（不返回 AAAA）；规则 `IP-CIDR,::/0,REJECT-NO-DROP,no-resolve` 拦掉所有公网 v6（局域网 v6 由 Lan 规则先放行）；`stun-response-ipv6` 伪造。iOS 没有系统级的 IPv6 开关，要彻底断 v6，在路由器上关闭 |
 
 **按设计会在本地解析的只有命中 DIRECT 的域名**（国内站、Apple/iCloud、微软服务默认直连）。这些查询走加密的国内 DoH，返回国内 CDN 地址。这是直连本身决定的，不算泄漏。介意微软域名被国内 DNS 看到，就在首页策略组里把「微软服务」切成 PROXY。
 
 **代价**：名单（约 11 万条，含 `.cn` 整个后缀）里没有的国内小站会走代理。连不上或很慢时，在 `[Rule]` 第 0 节加一行 `DOMAIN-SUFFIX,xxx.com,DIRECT`。
 
-### WebRTC 两种模式
+### WebRTC：为什么 v2rayN 能精准分流，这里也一样
 
-| | 节点 IP 模式（当前） | 伪造模式 |
+我看了 v2rayN 的源码（`SingboxRoutingService.cs`、`Sample/tun_singbox_rules`、`custom_routing_white`），它**没有任何专门处理 WebRTC 的代码**。它的做法是：TUN 接管所有流量（包括 STUN 用的 UDP），嗅探或通过 Fake-IP 反查出 STUN 服务器的域名，再套用普通分流规则（`geosite:cn` / `geoip:cn` 直连，其余代理）。
+
+小火箭的 TUN 加 Fake-IP 也是同一套机制，所以只要不把所有 STUN 强制送去代理，就能得到一样的效果。
+
+| | 精准分流（当前） | 伪造模式 |
 |---|---|---|
-| 测试页显示 | 节点出口 IP | `1.1.1.1` |
-| 和网页 IP 一致 | 是，风控看起来更自然 | 否，可能被判定为在用代理 |
-| 泄漏防护 | 依赖端口规则 | 不依赖分流，最稳 |
+| 国外网页的 STUN | 节点 IP，和网页 IP 一致 | `1.1.1.1` |
+| 国内会议 / 国内 STUN | 直连，体验正常 | `1.1.1.1` |
+| 泄漏防护 | 依赖分流规则 | 不依赖分流，最稳 |
 | 切换方式 | 默认 | 取消 `[General]` 里 `# stun-response-ip = 1.1.1.1` 的注释 |
 
-节点 IP 模式的**残余风险**：网页专门用非标准端口、国内 IP 的 STUN 服务器时，会绕过端口规则，命中 `GEOIP,CN` 直连。常见的公共 STUN（Google、Cloudflare、Twilio、Mozilla、Teams）和各类泄漏检测站都用上面这些端口，已经覆盖。介意这一点就切回伪造模式。
+**残余风险**（v2rayN 也一样）：网页如果故意指定一个国内 STUN 的**域名**（如 `stun.miwifi.com`），这个请求会按国内域名直连，网页就能读到真实 IP。要堵死这个口子，只能切到伪造模式。
 
-另外，钉钉、飞书、腾讯会议等走这些端口的音视频会经过代理，可能变慢。
-
-**风控一致性**：「WebRTC」组默认跟首页节点（PROXY）。用 AI 服务时把它切成「AI服务」，WebRTC IP 才会和 AI 网站看到的 IP 一致。
+**风控一致性**：国外 STUN 走它所属服务组的节点，例如 Google 的 STUN 走「谷歌服务」，其余走首页节点。直接写 IP 的 STUN 走「WebRTC」组，默认跟首页节点。
 
 ### 验证方法（连上后用 Safari 打开）
 
 - <https://browserleaks.com/dns>、<https://ipleak.net>：DNS 服务器只能显示节点所在地，不能出现中国大陆的运营商、阿里或腾讯。
 - <https://browserleaks.com/webrtc>：Public IPv4 应等于 <https://browserleaks.com/ip> 显示的节点 IP；IPv6 应为 `::1` 或空；无论如何都不能出现真实 IP。
-- 小火箭 → 配置 → 测试规则：输入 `stun.miwifi.com:3478`（国内 STUN）应命中 `DST-PORT,3478,WebRTC`，不能是 DIRECT。
+- 小火箭 → 配置 → 测试规则：`stun.l.google.com` 应走代理（谷歌服务）；`stun.miwifi.com` 应直连。
 - 小火箭 → 数据 → DNS 日志：访问国外网站时不应出现对应域名的本地查询。
 
 ## 4. 规则顺序与数据源
@@ -126,7 +129,8 @@ python3 scripts/check_conf.py --online   # 额外下载全部远程规则，确�
 - IP 规则缺 `no-resolve`
 - FINAL 能落到 DIRECT，或 FINAL 不在最后
 - DNS 里出现明文 IP 或 `system`
-- 节点 IP 模式下 STUN 端口规则缺失、能落到 DIRECT、或排在 DIRECT 规则之后
+- 未开伪造时，STUN 端口规则缺失、能落到 DIRECT、或排在 GEOIP 直连之后
+- IPv6 没有禁用（`ipv6`、`prefer-ipv6` 不是 false，或缺少 `IP-CIDR,::/0` 拦截规则）
 - 策略组引用了不存在的策略
 - 远程规则 404 或为空
 

@@ -60,6 +60,8 @@ GROUP_PATTERN = re.compile(
 PLAINTEXT_DNS_PATTERN = re.compile(r"^(\d{1,3}(\.\d{1,3}){3}|system)$")
 GROUP_OPTION_SEPARATOR = "="
 REQUIRED_GENERAL = {
+    "ipv6": "false",
+    "prefer-ipv6": "false",
     "stun-response-ipv6": None,
     "udp-policy-not-supported-behaviour": "REJECT",
     "dns-direct-system": "false",
@@ -71,6 +73,9 @@ STUN_PORTS = (
     "19302", "19303", "19304", "19305", "19306", "19307", "19308", "19309",
 )
 DST_PORT_RULE_TYPE = "DST-PORT"
+GEOIP_RULE_TYPE = "GEOIP"
+IPV6_ALL_CIDR = "::/0"
+REJECT_POLICY_PREFIX = "REJECT"
 DIRECT_POLICY = "DIRECT"
 HTTP_OK = 200
 HTTP_TIMEOUT_SECONDS = 30
@@ -172,7 +177,7 @@ def check_webrtc(
     groups: dict[str, list[str]],
     errors: list[str],
 ) -> None:
-    """校验 WebRTC 防泄漏: 伪造模式直接通过; 节点 IP 模式要求 STUN 端口规则齐全、靠前且不落直连.
+    """校验 WebRTC 防泄漏: 伪造模式直接通过; 否则要求 STUN 端口规则齐全、在 GEOIP 直连之前且不落直连.
 
     Args:
         general: [General] 键值.
@@ -182,11 +187,11 @@ def check_webrtc(
     """
     if STUN_SPOOF_KEY in general:
         return
-    first_direct = next(
+    first_direct_geoip = next(
         (
             i
             for i, (_, line) in enumerate(rules)
-            if not is_stun_port_rule(line) and can_go_direct(rule_policy(line), groups)
+            if line.startswith(GEOIP_RULE_TYPE) and can_go_direct(rule_policy(line), groups)
         ),
         len(rules),
     )
@@ -202,8 +207,18 @@ def check_webrtc(
         index, lineno, policy = port_rules[port]
         if can_go_direct(policy, groups):
             errors.append(f"第 {lineno} 行：STUN 端口 {port} 的策略 {policy} 可落到 DIRECT")
-        if index > first_direct:
-            errors.append(f"第 {lineno} 行：STUN 端口 {port} 规则必须放在所有 DIRECT 规则之前")
+        if index > first_direct_geoip:
+            errors.append(f"第 {lineno} 行：STUN 端口 {port} 规则必须放在 GEOIP 直连规则之前，否则国内 IP 的 STUN 会直连")
+
+
+def check_ipv6_block(rules: list[tuple[int, str]], errors: list[str]) -> None:
+    """要求存在拦截全部公网 IPv6 的规则 IP-CIDR,::/0,REJECT*,no-resolve."""
+    for _, line in rules:
+        fields = [f.strip() for f in line.split(",")]
+        is_v6_all = fields[0] in IP_RULE_TYPES and len(fields) > 2 and fields[1] == IPV6_ALL_CIDR
+        if is_v6_all and fields[2].startswith(REJECT_POLICY_PREFIX):
+            return
+    errors.append(f"[Rule] 缺少 IP-CIDR,{IPV6_ALL_CIDR},REJECT-NO-DROP,no-resolve，直接用 IPv6 地址的连接可能暴露真实 v6")
 
 
 def check_rules(
@@ -296,6 +311,7 @@ def main() -> int:
             errors.append(f"策略组 {name} 引用了未定义的策略 {undefined}")
     urls = check_rules(sections.get("Rule", []), groups, errors)
     check_webrtc(general, sections.get("Rule", []), groups, errors)
+    check_ipv6_block(sections.get("Rule", []), errors)
     if args.online:
         logger.info("校验 %d 个远程规则：", len(urls))
         check_remote(urls, errors)
