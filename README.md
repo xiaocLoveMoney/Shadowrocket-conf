@@ -10,6 +10,10 @@
 
 ## 1. 导入小火箭
 
+**最省事：在 iPhone 的 Safari 里打开导入页** → <https://xiaoclovemoney.github.io/Shadowrocket-conf/>
+
+页面上有三步：一键导入配置、一键复制 GeoIP 数据库链接、自动更新与泄漏自检。GeoIP 数据库只能在 App 里手动填，配置文件和链接都设置不了，所以第 2 步是复制好链接给你粘贴。
+
 **配置链接**（在小火箭里粘贴这个）：
 
 ```
