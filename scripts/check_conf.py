@@ -60,11 +60,18 @@ GROUP_PATTERN = re.compile(
 PLAINTEXT_DNS_PATTERN = re.compile(r"^(\d{1,3}(\.\d{1,3}){3}|system)$")
 GROUP_OPTION_SEPARATOR = "="
 REQUIRED_GENERAL = {
-    "stun-response-ip": None,
     "stun-response-ipv6": None,
     "udp-policy-not-supported-behaviour": "REJECT",
     "dns-direct-system": "false",
 }
+# 未伪造 IPv4 STUN（节点 IP 模式）时, 这些端口必须在所有 DIRECT 规则之前强制走代理
+STUN_SPOOF_KEY = "stun-response-ip"
+STUN_PORTS = (
+    "3478", "3479", "3480", "3481", "5349", "5350",
+    "19302", "19303", "19304", "19305", "19306", "19307", "19308", "19309",
+)
+DST_PORT_RULE_TYPE = "DST-PORT"
+DIRECT_POLICY = "DIRECT"
 HTTP_OK = 200
 HTTP_TIMEOUT_SECONDS = 30
 MIN_REMOTE_BYTES = 64
@@ -136,6 +143,67 @@ def check_general(general: dict[str, str], errors: list[str]) -> None:
             errors.append(
                 f"[General] {key} 含明文/系统 DNS {plaintext}，会让查询以明文暴露给 ISP"
             )
+
+
+def rule_policy(line: str) -> str:
+    """取出一条规则的策略名（兼容 FINAL 与 AND/OR/NOT 逻辑规则）."""
+    rule_type = line.split(",", 1)[0].strip()
+    if rule_type in LOGIC_RULE_TYPES:
+        return line.rsplit("),", 1)[-1].split(",")[0].strip()
+    fields = [f.strip() for f in line.split(",")]
+    policy_index = 1 if rule_type == FINAL_RULE_TYPE else 2
+    return fields[policy_index] if len(fields) > policy_index else ""
+
+
+def is_stun_port_rule(line: str) -> bool:
+    """是否为针对 STUN 端口的 DST-PORT 规则."""
+    fields = [f.strip() for f in line.split(",")]
+    return fields[0] == DST_PORT_RULE_TYPE and len(fields) > 1 and fields[1] in STUN_PORTS
+
+
+def can_go_direct(policy: str, groups: dict[str, list[str]]) -> bool:
+    """策略本身是 DIRECT, 或是可切换到 DIRECT 的策略组."""
+    return policy == DIRECT_POLICY or DIRECT_POLICY in groups.get(policy, [])
+
+
+def check_webrtc(
+    general: dict[str, str],
+    rules: list[tuple[int, str]],
+    groups: dict[str, list[str]],
+    errors: list[str],
+) -> None:
+    """校验 WebRTC 防泄漏: 伪造模式直接通过; 节点 IP 模式要求 STUN 端口规则齐全、靠前且不落直连.
+
+    Args:
+        general: [General] 键值.
+        rules: [Rule] 有效行.
+        groups: 策略组定义.
+        errors: 错误收集列表.
+    """
+    if STUN_SPOOF_KEY in general:
+        return
+    first_direct = next(
+        (
+            i
+            for i, (_, line) in enumerate(rules)
+            if not is_stun_port_rule(line) and can_go_direct(rule_policy(line), groups)
+        ),
+        len(rules),
+    )
+    port_rules: dict[str, tuple[int, int, str]] = {}
+    for index, (lineno, line) in enumerate(rules):
+        fields = [f.strip() for f in line.split(",")]
+        if fields[0] == DST_PORT_RULE_TYPE and len(fields) > 2:
+            port_rules[fields[1]] = (index, lineno, fields[2])
+    for port in STUN_PORTS:
+        if port not in port_rules:
+            errors.append(f"节点 IP 模式缺少 STUN 端口规则 DST-PORT,{port}，该端口 STUN 可能直连泄漏真实 IP")
+            continue
+        index, lineno, policy = port_rules[port]
+        if can_go_direct(policy, groups):
+            errors.append(f"第 {lineno} 行：STUN 端口 {port} 的策略 {policy} 可落到 DIRECT")
+        if index > first_direct:
+            errors.append(f"第 {lineno} 行：STUN 端口 {port} 规则必须放在所有 DIRECT 规则之前")
 
 
 def check_rules(
@@ -227,6 +295,7 @@ def main() -> int:
         if undefined:
             errors.append(f"策略组 {name} 引用了未定义的策略 {undefined}")
     urls = check_rules(sections.get("Rule", []), groups, errors)
+    check_webrtc(general, sections.get("Rule", []), groups, errors)
     if args.online:
         logger.info("校验 %d 个远程规则：", len(urls))
         check_remote(urls, errors)

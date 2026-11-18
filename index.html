@@ -86,7 +86,8 @@
       <li>系统设置 → 通用 → 后台 App 刷新：给小火箭打开</li>
       <li>首页「全局路由」选<b>配置</b>，连接后打开
         <a href="https://browserleaks.com/dns">browserleaks.com/dns</a> 和
-        <a href="https://browserleaks.com/webrtc">/webrtc</a>：不应看到中国大陆的 DNS 服务器，也不应看到你的真实 IP</li>
+        <a href="https://browserleaks.com/webrtc">/webrtc</a>：DNS 不应出现中国大陆服务器；WebRTC 的 IPv4 应是节点 IP、IPv6 为 ::1 或空，都不能是你的真实 IP</li>
+      <li>用 AI 服务时，在首页策略组把「WebRTC」切成「AI服务」，两边 IP 保持一致</li>
     </ol>
   </section>
 

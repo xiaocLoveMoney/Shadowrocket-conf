@@ -61,18 +61,35 @@ shadowrocket://config/add/https://raw.githubusercontent.com/xiaocLoveMoney/Shado
 | 解析失败回落明文 | `dns-direct-fallback-proxy = true`：直连域名解析失败改走代理解析 |
 | HTTPS/SVCB 记录绕过 Fake-IP | `allow-dns-svcb = false` |
 | App 硬编码公共 DNS | `hijack-dns` 劫持 8.8.8.8 / 1.1.1.1 / 9.9.9.9 / OpenDNS 等 |
-| WebRTC 暴露公网 IP | `stun-response-ip = 1.1.1.1`、`stun-response-ipv6 = ::1`，STUN 拿到的是伪造地址 |
-| UDP 回落直连暴露 IP | `udp-policy-not-supported-behaviour = REJECT` |
+| WebRTC 暴露公网 IPv4 | **节点 IP 模式**：STUN/TURN 端口（3478-3481、5349/5350、19302-19309）在所有 DIRECT 规则之前强制走「WebRTC」策略组，不分 TCP/UDP，也不管目标是不是国内 IP。网页看到的是节点出口 IP，和访问网站的 IP 一致 |
+| WebRTC 暴露公网 IPv6 | 节点普遍不支持 v6，`stun-response-ipv6 = ::1` 继续伪造 |
+| UDP 回落直连暴露 IP | `udp-policy-not-supported-behaviour = REJECT`：节点不支持 UDP 时直接拒绝 STUN，网页拿不到任何 IP |
 | IPv6 绕过代理 | `ipv6 = false`，不返回 AAAA |
 
 **按设计会在本地解析的只有命中 DIRECT 的域名**（国内站、Apple/iCloud、微软服务默认直连）。这些查询走加密的国内 DoH，返回国内 CDN 地址。这是直连本身决定的，不算泄漏。介意微软域名被国内 DNS 看到，就在首页策略组里把「微软服务」切成 PROXY。
 
 **代价**：名单（约 11 万条，含 `.cn` 整个后缀）里没有的国内小站会走代理。连不上或很慢时，在 `[Rule]` 第 0 节加一行 `DOMAIN-SUFFIX,xxx.com,DIRECT`。
 
+### WebRTC 两种模式
+
+| | 节点 IP 模式（当前） | 伪造模式 |
+|---|---|---|
+| 测试页显示 | 节点出口 IP | `1.1.1.1` |
+| 和网页 IP 一致 | 是，风控看起来更自然 | 否，可能被判定为在用代理 |
+| 泄漏防护 | 依赖端口规则 | 不依赖分流，最稳 |
+| 切换方式 | 默认 | 取消 `[General]` 里 `# stun-response-ip = 1.1.1.1` 的注释 |
+
+节点 IP 模式的**残余风险**：网页专门用非标准端口、国内 IP 的 STUN 服务器时，会绕过端口规则，命中 `GEOIP,CN` 直连。常见的公共 STUN（Google、Cloudflare、Twilio、Mozilla、Teams）和各类泄漏检测站都用上面这些端口，已经覆盖。介意这一点就切回伪造模式。
+
+另外，钉钉、飞书、腾讯会议等走这些端口的音视频会经过代理，可能变慢。
+
+**风控一致性**：「WebRTC」组默认跟首页节点（PROXY）。用 AI 服务时把它切成「AI服务」，WebRTC IP 才会和 AI 网站看到的 IP 一致。
+
 ### 验证方法（连上后用 Safari 打开）
 
 - <https://browserleaks.com/dns>、<https://ipleak.net>：DNS 服务器只能显示节点所在地，不能出现中国大陆的运营商、阿里或腾讯。
-- <https://browserleaks.com/webrtc>：Public IP 不能是你的真实 IP。
+- <https://browserleaks.com/webrtc>：Public IPv4 应等于 <https://browserleaks.com/ip> 显示的节点 IP；IPv6 应为 `::1` 或空；无论如何都不能出现真实 IP。
+- 小火箭 → 配置 → 测试规则：输入 `stun.miwifi.com:3478`（国内 STUN）应命中 `DST-PORT,3478,WebRTC`，不能是 DIRECT。
 - 小火箭 → 数据 → DNS 日志：访问国外网站时不应出现对应域名的本地查询。
 
 ## 4. 规则顺序与数据源
@@ -105,7 +122,13 @@ python3 scripts/check_conf.py            # 离线校验，每次改完必跑
 python3 scripts/check_conf.py --online   # 额外下载全部远程规则，确认链接都活着
 ```
 
-校验器会拦下这些问题：IP 规则缺 `no-resolve`、FINAL 能落到 DIRECT、DNS 里出现明文 IP 或 `system`、缺少 STUN 伪造参数、策略组引用了不存在的策略、FINAL 不在最后、远程规则 404 或为空。
+校验器会拦下这些问题：
+- IP 规则缺 `no-resolve`
+- FINAL 能落到 DIRECT，或 FINAL 不在最后
+- DNS 里出现明文 IP 或 `system`
+- 节点 IP 模式下 STUN 端口规则缺失、能落到 DIRECT、或排在 DIRECT 规则之后
+- 策略组引用了不存在的策略
+- 远程规则 404 或为空
 
 调试分流用小火箭 → 配置 → 编辑配置 → **测试规则**，输入域名就能看到它命中哪条规则、走什么策略。
 
